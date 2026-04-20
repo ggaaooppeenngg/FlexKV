@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://test.pypi.org/project/flexkv/
+      url: https://pypi.org/p/flexkv
     permissions:
       id-token: write   # Required for trusted publishing (OIDC)
 
@@ -120,6 +120,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
 
   # ── Create GitHub Release with assets ─────────────────────────────────────
   github-release:
