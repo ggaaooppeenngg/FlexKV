@@ -5,9 +5,9 @@ name: flexkv ci
 
 on:
   pull_request:
-    branches: ["main", "dev"]
+    branches: ["main", "dev", "lilgao-ci-dev"]
   push:
-    branches: ["main", "dev"]
+    branches: ["main", "dev", "lilgao-ci-dev"]
     tags:
       - "v*"       # Trigger publish on version tags like v1.0.0
 
