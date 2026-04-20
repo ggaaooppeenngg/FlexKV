@@ -11,7 +11,6 @@ sudo    apt-get install -y --no-install-recommends \
 
 sudo    apt-get install -y --no-install-recommends \
         build-essential \
-        liburing-dev \
         git \
         cmake
 

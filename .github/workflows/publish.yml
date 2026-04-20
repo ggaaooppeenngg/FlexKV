@@ -1,45 +1,57 @@
-# This workflow will upload a Python Package to Release asset
+# This workflow builds FlexKV wheels and publishes them to PyPI on tagged releases.
 # For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
 # Copied from vLLM github actions https://github.com/vllm-project/vllm/blob/main/.github/workflows/publish.yml
 name: flexkv ci
 
 on:
   pull_request:
-    branches: [ "main", "dev"]
+    branches: ["main", "dev"]
   push:
-    branches: [ "main", "dev"]
+    branches: ["main", "dev"]
+    tags:
+      - "v*"       # Trigger publish on version tags like v1.0.0
 
 # Needed to create wheel and upload assets
 permissions:
   contents: write
 
-jobs:
-  build:
-    name: Build Wheel
-    runs-on: ${{ matrix.os }}
+env:
+  FLEXKV_ENABLE_METRICS: "0"   # Disable Prometheus by default in CI (no submodule dep)
+  DEBIAN_FRONTEND: noninteractive
 
+jobs:
+  # ── Build matrix ──────────────────────────────────────────────────────────
+  build:
+    name: Build Wheel (py${{ matrix.python-version }}, cu${{ matrix.cuda-version }}, pt${{ matrix.pytorch-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-          os: ['ubuntu-22.04']
-          python-version: ['3.10']
-          pytorch-version: ['2.6.0']
-          cuda-version: ['12.4']
+        os: ["ubuntu-22.04"]
+        python-version: ["3.12"]
+        pytorch-version: ["2.6.0"]
+        cuda-version: ["13.0"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /usr/share/dotnet /opt/ghc || true
+          df -h /
 
       - name: Set up Linux Env
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          bash -x .github/workflows/scripts/env.sh
+        if: runner.os == 'Linux'
+        run: bash -x .github/workflows/scripts/env.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: ${{ matrix.python-version }}
-            cache: 'pip'
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
       - name: Install CUDA ${{ matrix.cuda-version }}
         run: |
@@ -52,22 +64,77 @@ jobs:
       - name: Build wheel
         shell: bash
         env:
-          TORCH_CUDA_ARCH_LIST: "8.9 9.0+PTX"
+          TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0+PTX 10.0a"
           MAX_JOBS: 4
         run: |
-          ./build.sh --release
+          ./.github/workflows/scripts/publish.sh
 
-      - name: Get Date and Time
+      - name: Rename wheel to include CUDA version tag
         run: |
-          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-          echo "time=$(date +'%H-%M-%S')" >> $GITHUB_ENV
+          cd dist
+          for whl in *.whl; do
+            # Inject cu124 into the wheel filename for clarity
+            new_name=$(echo "$whl" | sed "s/flexkv-/flexkv+cu${{ matrix.cuda-version }}-/; s/\./-/3")
+            if [ "$whl" != "$new_name" ]; then
+              mv "$whl" "$new_name" || true
+            fi
+          done
+          ls -lh *.whl
 
-      - name: Upload to cos
-        uses: shallwefootball/s3-upload-action@master
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
         with:
-          aws_key_id: ${{ secrets.COS_SECRET_ID }}
-          aws_secret_access_key: ${{ secrets.COS_SECRET_KEY }}
-          aws_bucket: ${{ secrets.COS_BUCKET }}
-          endpoint: ${{ secrets.COS_ENDPOINT }}
-          source_dir: dist
-          destination_dir: flexkv/${{ env.date }}/${{ env.time }}
+          name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-pt${{ matrix.pytorch-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  # ── Publish to PyPI on tagged releases ────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/flexkv/
+    permissions:
+      id-token: write   # Required for trusted publishing (OIDC)
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List wheels to publish
+        run: ls -lh dist/
+
+      - name: Publish to PyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  # ── Create GitHub Release with assets ─────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.whl

@@ -99,6 +99,7 @@ if os.path.exists(lib_dir):
     extra_link_args.extend([f"-Wl,-rpath,{lib_dir}", "-Wl,-rpath,$ORIGIN"])
     # Also add the current package directory to rpath for installed libraries
     extra_link_args.append("-Wl,-rpath,$ORIGIN/../lib")
+    extra_link_args.append("-Wl,-rpath,$ORIGIN/lib")
 
 if enable_cfs:
     print("ENABLE_CFS = true: compiling and link cfs related content")
