@@ -67,7 +67,7 @@ jobs:
           TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0+PTX 10.0a"
           MAX_JOBS: 4
         run: |
-          ./.github/workflows/scripts/publish.sh
+          .github/workflows/scripts/publish.sh
 
       - name: Rename wheel to include CUDA version tag
         run: |
