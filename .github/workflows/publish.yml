@@ -73,7 +73,7 @@ jobs:
         run: |
           cd dist
           for whl in *.whl; do
-            # Inject cu124 into the wheel filename for clarity
+            # Inject cuda verison into the wheel filename for clarity
             new_name=$(echo "$whl" | sed "s/flexkv-/flexkv+cu${{ matrix.cuda-version }}-/; s/\./-/3")
             if [ "$whl" != "$new_name" ]; then
               mv "$whl" "$new_name" || true
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/flexkv/
+      url: https://test.pypi.org/project/flexkv/
     permissions:
       id-token: write   # Required for trusted publishing (OIDC)
 
