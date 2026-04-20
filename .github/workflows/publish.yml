@@ -93,15 +93,15 @@ jobs:
           path: dist/*.whl
           retention-days: 30
 
-  # ── Publish to PyPI on tagged releases ────────────────────────────────────
+  # ── Publish to TestPyPI on tagged releases ───────────────────────────────
   publish-pypi:
-    name: Publish to PyPI
+    name: Publish to TestPyPI
     needs: build
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
-      name: pypi
-      url: https://pypi.org/p/flexkv
+      name: testpypi
+      url: https://test.pypi.org/project/flexkv/
     permissions:
       id-token: write   # Required for trusted publishing (OIDC)
 
@@ -116,7 +116,7 @@ jobs:
       - name: List wheels to publish
         run: ls -lh dist/
 
-      - name: Publish to PyPI (Trusted Publisher)
+      - name: Publish to TestPyPI (Trusted Publisher)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
