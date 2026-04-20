@@ -61,6 +61,20 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.pytorch-version }} ${{ matrix.cuda-version }}
 
+      - name: Sync VERSION to git tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          # Strip the leading "v" from the tag (e.g. refs/tags/v1.2.3 -> 1.2.3)
+          tag_version="${GITHUB_REF_NAME#v}"
+          # Validate PEP 440 style release version (allow .postN / .rcN / etc. if desired)
+          if ! [[ "${tag_version}" =~ ^[0-9]+(\.[0-9]+)*([a-zA-Z0-9.+-]*)?$ ]]; then
+            echo "Tag ${GITHUB_REF_NAME} is not a valid version" >&2
+            exit 1
+          fi
+          echo "Setting VERSION to ${tag_version}"
+          printf '%s\n' "${tag_version}" > VERSION
+
       - name: Build wheel
         shell: bash
         env:
@@ -69,17 +83,8 @@ jobs:
         run: |
           .github/workflows/scripts/publish.sh
 
-      - name: Rename wheel to include CUDA version tag
-        run: |
-          cd dist
-          for whl in *.whl; do
-            # Inject cuda verison into the wheel filename for clarity
-            new_name=$(echo "$whl" | sed "s/flexkv-/flexkv+cu${{ matrix.cuda-version }}-/; s/\./-/3")
-            if [ "$whl" != "$new_name" ]; then
-              mv "$whl" "$new_name" || true
-            fi
-          done
-          ls -lh *.whl
+      - name: Show built wheel
+        run: ls -lh dist/*.whl
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
