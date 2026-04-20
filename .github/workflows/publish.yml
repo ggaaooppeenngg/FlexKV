@@ -83,6 +83,57 @@ jobs:
         run: |
           .github/workflows/scripts/publish.sh
 
+      - name: Repair wheel with auditwheel (retag to manylinux)
+        shell: bash
+        run: |
+          # PyPI rejects plain 'linux_x86_64' wheels — they require a
+          # manylinux / musllinux platform tag. auditwheel:
+          #   1. verifies the wheel's external libs are glibc-baseline compatible
+          #   2. rewrites the platform tag from linux_x86_64 → manylinux_*
+          #
+          # We EXCLUDE torch/CUDA/NCCL shared libs so auditwheel doesn't try
+          # to bundle gigabytes of GPU runtime into the wheel. Those libraries
+          # are already provided by the user's existing torch installation at
+          # runtime, and many are not manylinux-compatible anyway.
+          python -m pip install --upgrade auditwheel patchelf
+
+          # Prepend torch's lib dir to LD_LIBRARY_PATH so auditwheel can
+          # resolve libtorch* when walking the wheel's needed-libs graph.
+          TORCH_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"
+          export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+
+          mkdir -p wheelhouse
+          for whl in dist/*.whl; do
+            echo "=== Repairing ${whl} ==="
+            python -m auditwheel repair "${whl}" \
+              --plat manylinux_2_35_x86_64 \
+              --exclude 'libtorch.so' \
+              --exclude 'libtorch_cpu.so' \
+              --exclude 'libtorch_cuda.so' \
+              --exclude 'libtorch_python.so' \
+              --exclude 'libc10.so' \
+              --exclude 'libc10_cuda.so' \
+              --exclude 'libcudart.so*' \
+              --exclude 'libcuda.so*' \
+              --exclude 'libnvToolsExt.so*' \
+              --exclude 'libnvrtc.so*' \
+              --exclude 'libcublas.so*' \
+              --exclude 'libcublasLt.so*' \
+              --exclude 'libcudnn.so*' \
+              --exclude 'libnccl.so*' \
+              --exclude 'libcufft.so*' \
+              --exclude 'libcurand.so*' \
+              --exclude 'libcusolver.so*' \
+              --exclude 'libcusparse.so*' \
+              --exclude 'libcufile.so*' \
+              -w wheelhouse/
+          done
+
+          # Replace the raw linux_x86_64 wheel(s) with the repaired manylinux wheel(s).
+          rm -f dist/*.whl
+          mv wheelhouse/*.whl dist/
+          ls -lh dist/*.whl
+
       - name: Show built wheel
         run: ls -lh dist/*.whl
 
