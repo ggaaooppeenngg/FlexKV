@@ -1,45 +1,75 @@
-# This workflow will upload a Python Package to Release asset
+# This workflow builds FlexKV wheels and publishes them to PyPI on tagged releases.
 # For more information see: https://help.github.com/en/actions/language-and-framework-guides/using-python-with-github-actions
 # Copied from vLLM github actions https://github.com/vllm-project/vllm/blob/main/.github/workflows/publish.yml
 name: flexkv ci
 
 on:
   pull_request:
-    branches: [ "main", "dev"]
+    branches: ["main", "dev", "lilgao-ci-dev"]
   push:
-    branches: [ "main", "dev"]
+    branches: ["main", "dev", "lilgao-ci-dev"]
+    tags:
+      - "v*"       # Trigger publish on version tags like v1.0.0
 
 # Needed to create wheel and upload assets
 permissions:
   contents: write
 
-jobs:
-  build:
-    name: Build Wheel
-    runs-on: ${{ matrix.os }}
+env:
+  FLEXKV_ENABLE_METRICS: "0"   # Disable Prometheus by default in CI (no submodule dep)
+  DEBIAN_FRONTEND: noninteractive
 
+jobs:
+  # ── Build matrix ──────────────────────────────────────────────────────────
+  # We build one wheel per CUDA variant. Torch's CUDA runtime is ABI-coupled
+  # to its major.minor: a wheel linked against libcudart.so.12 will not load
+  # in a torch-cu13 env and vice-versa. So we ship both:
+  #
+  #   - cu128 (default): published to TestPyPI as the canonical wheel
+  #                      (no local-version suffix, name = flexkv-X.Y.Z-...whl)
+  #                      and attached to the GitHub Release.
+  #   - cu130          : attached to the GitHub Release only, with a PEP 440
+  #                      local-version suffix `+cu130` in the filename
+  #                      (PyPI rejects local versions). Users install via URL:
+  #                         pip install https://.../flexkv-X.Y.Z+cu130-...whl
+  build:
+    name: Build Wheel (py${{ matrix.python-version }}, cu${{ matrix.cuda-version }}, pt${{ matrix.pytorch-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-          os: ['ubuntu-22.04']
-          python-version: ['3.10']
-          pytorch-version: ['2.6.0']
-          cuda-version: ['12.4']
+        include:
+          - os: "ubuntu-22.04"
+            python-version: "3.12"
+            cuda-version: "12.8"
+            pytorch-version: "2.7.1"
+            is-default-cuda: true
+          - os: "ubuntu-22.04"
+            python-version: "3.12"
+            cuda-version: "13.0"
+            pytorch-version: "2.9.0"
+            is-default-cuda: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" /usr/share/dotnet /opt/ghc || true
+          df -h /
 
       - name: Set up Linux Env
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          bash -x .github/workflows/scripts/env.sh
+        if: runner.os == 'Linux'
+        run: bash -x .github/workflows/scripts/env.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: ${{ matrix.python-version }}
-            cache: 'pip'
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
       - name: Install CUDA ${{ matrix.cuda-version }}
         run: |
@@ -49,25 +79,175 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.pytorch-version }} ${{ matrix.cuda-version }}
 
+      - name: Sync VERSION to git tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          # Strip the leading "v" from the tag (e.g. refs/tags/v1.2.3 -> 1.2.3)
+          tag_version="${GITHUB_REF_NAME#v}"
+          # Validate PEP 440 style release version (allow .postN / .rcN / etc. if desired)
+          if ! [[ "${tag_version}" =~ ^[0-9]+(\.[0-9]+)*([a-zA-Z0-9.+-]*)?$ ]]; then
+            echo "Tag ${GITHUB_REF_NAME} is not a valid version" >&2
+            exit 1
+          fi
+          echo "Setting VERSION to ${tag_version}"
+          printf '%s\n' "${tag_version}" > VERSION
+
+      - name: Append +cuXYZ local version suffix for non-default CUDA
+        if: matrix.is-default-cuda != true
+        shell: bash
+        run: |
+          # PEP 440 local-version identifier: "<base>+cu130". PyPI rejects local
+          # versions, which is exactly what we want for non-default CUDA builds
+          # (they go to the GitHub Release only). Two wheels with the same base
+          # version but different +cuXYZ suffixes live side-by-side in `dist/`
+          # without colliding.
+          suffix="+cu$(echo '${{ matrix.cuda-version }}' | tr -d '.')"
+          current="$(cat VERSION)"
+          # Strip any pre-existing local-version segment so re-runs are idempotent.
+          base="${current%%+*}"
+          new="${base}${suffix}"
+          echo "VERSION: ${current} -> ${new}"
+          printf '%s\n' "${new}" > VERSION
+
       - name: Build wheel
         shell: bash
         env:
-          TORCH_CUDA_ARCH_LIST: "8.9 9.0+PTX"
+          TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0a 9.0+PTX 10.0a"
           MAX_JOBS: 4
         run: |
-          ./build.sh --release
+          .github/workflows/scripts/publish.sh
 
-      - name: Get Date and Time
+      - name: Repair wheel with auditwheel (retag to manylinux)
+        shell: bash
         run: |
-          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-          echo "time=$(date +'%H-%M-%S')" >> $GITHUB_ENV
+          # PyPI rejects plain 'linux_x86_64' wheels — they require a
+          # manylinux / musllinux platform tag. auditwheel:
+          #   1. verifies the wheel's external libs are glibc-baseline compatible
+          #   2. rewrites the platform tag from linux_x86_64 → manylinux_*
+          #
+          # We EXCLUDE torch/CUDA/NCCL shared libs so auditwheel doesn't try
+          # to bundle gigabytes of GPU runtime into the wheel. Those libraries
+          # are already provided by the user's existing torch installation at
+          # runtime, and many are not manylinux-compatible anyway.
+          python -m pip install --upgrade auditwheel patchelf
 
-      - name: Upload to cos
-        uses: shallwefootball/s3-upload-action@master
+          # Prepend torch's lib dir to LD_LIBRARY_PATH so auditwheel can
+          # resolve libtorch* when walking the wheel's needed-libs graph.
+          TORCH_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"
+          export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+
+          mkdir -p wheelhouse
+          for whl in dist/*.whl; do
+            echo "=== Repairing ${whl} ==="
+            python -m auditwheel repair "${whl}" \
+              --plat manylinux_2_35_x86_64 \
+              --exclude 'libtorch.so' \
+              --exclude 'libtorch_cpu.so' \
+              --exclude 'libtorch_cuda.so' \
+              --exclude 'libtorch_python.so' \
+              --exclude 'libc10.so' \
+              --exclude 'libc10_cuda.so' \
+              --exclude 'libcudart.so*' \
+              --exclude 'libcuda.so*' \
+              --exclude 'libnvToolsExt.so*' \
+              --exclude 'libnvrtc.so*' \
+              --exclude 'libcublas.so*' \
+              --exclude 'libcublasLt.so*' \
+              --exclude 'libcudnn.so*' \
+              --exclude 'libnccl.so*' \
+              --exclude 'libcufft.so*' \
+              --exclude 'libcurand.so*' \
+              --exclude 'libcusolver.so*' \
+              --exclude 'libcusparse.so*' \
+              --exclude 'libcufile.so*' \
+              -w wheelhouse/
+          done
+
+          # Replace the raw linux_x86_64 wheel(s) with the repaired manylinux wheel(s).
+          rm -f dist/*.whl
+          mv wheelhouse/*.whl dist/
+          ls -lh dist/*.whl
+
+      - name: Show built wheel
+        run: ls -lh dist/*.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
         with:
-          aws_key_id: ${{ secrets.COS_SECRET_ID }}
-          aws_secret_access_key: ${{ secrets.COS_SECRET_KEY }}
-          aws_bucket: ${{ secrets.COS_BUCKET }}
-          endpoint: ${{ secrets.COS_ENDPOINT }}
-          source_dir: dist
-          destination_dir: flexkv/${{ env.date }}/${{ env.time }}
+          name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-pt${{ matrix.pytorch-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  # ── Publish to TestPyPI on tagged releases ───────────────────────────────
+  publish-pypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/flexkv/
+    permissions:
+      id-token: write   # Required for trusted publishing (OIDC)
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Keep only the default-CUDA wheel for TestPyPI
+        shell: bash
+        run: |
+          # TestPyPI / PyPI reject PEP 440 local-version identifiers, so we
+          # drop any wheel whose version contains a `+` (i.e. the +cu130
+          # variant). Only the default cu128 wheel is published to the index.
+          # The non-default wheels are still attached to the GitHub Release.
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            # Wheel filename: name-<version>-<python>-<abi>-<plat>.whl
+            # Version is the 2nd '-'-separated field.
+            version="$(basename "${whl}" | awk -F- '{print $2}')"
+            if [[ "${version}" == *+* ]]; then
+              echo "Skipping (local version not allowed on PyPI): ${whl}"
+              rm -f "${whl}"
+            else
+              echo "Publishing: ${whl}"
+            fi
+          done
+          ls -lh dist/
+
+      - name: List wheels to publish
+        run: ls -lh dist/
+
+      - name: Publish to TestPyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+
+  # ── Create GitHub Release with assets ─────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.whl

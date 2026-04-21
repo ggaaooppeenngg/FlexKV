@@ -75,7 +75,7 @@ if enable_p2p:
 if enable_cputest:
     extra_link_args.remove("-lcuda")
     # Set TORCH_CUDA_ARCH_LIST to avoid IndexError when no GPU is available
-    os.environ["TORCH_CUDA_ARCH_LIST"] = "7.0;7.5;8.0;8.6;9.0"
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "7.0;7.5;8.0;8.6;9.0;10.0a"
 
 
 # Prometheus libraries only when metrics enabled
@@ -99,6 +99,7 @@ if os.path.exists(lib_dir):
     extra_link_args.extend([f"-Wl,-rpath,{lib_dir}", "-Wl,-rpath,$ORIGIN"])
     # Also add the current package directory to rpath for installed libraries
     extra_link_args.append("-Wl,-rpath,$ORIGIN/../lib")
+    extra_link_args.append("-Wl,-rpath,$ORIGIN/lib")
 
 if enable_cfs:
     print("ENABLE_CFS = true: compiling and link cfs related content")
