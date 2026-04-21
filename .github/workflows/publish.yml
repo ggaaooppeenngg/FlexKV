@@ -33,18 +33,45 @@ jobs:
   #                      (PyPI rejects local versions). Users install via URL:
   #                         pip install https://.../flexkv-X.Y.Z+cu130-...whl
   build:
-    name: Build Wheel (py${{ matrix.python-version }}, cu${{ matrix.cuda-version }}, pt${{ matrix.pytorch-version }})
+    name: Build Wheel (${{ matrix.arch }}, py${{ matrix.python-version }}, cu${{ matrix.cuda-version }}, pt${{ matrix.pytorch-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ── x86_64 ────────────────────────────────────────────────────────
           - os: "ubuntu-22.04"
+            arch: "x86_64"
+            manylinux-tag: "manylinux_2_35_x86_64"
             python-version: "3.12"
             cuda-version: "12.8"
             pytorch-version: "2.7.1"
             is-default-cuda: true
           - os: "ubuntu-22.04"
+            arch: "x86_64"
+            manylinux-tag: "manylinux_2_35_x86_64"
+            python-version: "3.12"
+            cuda-version: "13.0"
+            pytorch-version: "2.9.0"
+            is-default-cuda: false
+          # ── aarch64 (GitHub-hosted Cobalt/Graviton runners — CPU-only) ────
+          # These runners have no NVIDIA GPU, so detect_cuda_arch() in
+          # setup.py falls back to its hardcoded SM list. NVIDIA's CUDA apt
+          # repo URL switches from x86_64/ to sbsa/ — see cuda-install.sh.
+          # Using ubuntu-22.04-arm (glibc 2.35) so the resulting wheel is
+          # tagged manylinux_2_35_aarch64, matching torch's own aarch64
+          # baseline and running on all recent aarch64 CUDA environments
+          # (Ubuntu 22.04+, AL2023, recent NGC).
+          - os: "ubuntu-22.04-arm"
+            arch: "aarch64"
+            manylinux-tag: "manylinux_2_35_aarch64"
+            python-version: "3.12"
+            cuda-version: "12.8"
+            pytorch-version: "2.7.1"
+            is-default-cuda: true
+          - os: "ubuntu-22.04-arm"
+            arch: "aarch64"
+            manylinux-tag: "manylinux_2_35_aarch64"
             python-version: "3.12"
             cuda-version: "13.0"
             pytorch-version: "2.9.0"
@@ -141,7 +168,7 @@ jobs:
           for whl in dist/*.whl; do
             echo "=== Repairing ${whl} ==="
             python -m auditwheel repair "${whl}" \
-              --plat manylinux_2_35_x86_64 \
+              --plat ${{ matrix.manylinux-tag }} \
               --exclude 'libtorch.so' \
               --exclude 'libtorch_cpu.so' \
               --exclude 'libtorch_cuda.so' \
@@ -175,7 +202,7 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-pt${{ matrix.pytorch-version }}
+          name: wheel-${{ matrix.arch }}-py${{ matrix.python-version }}-cu${{ matrix.cuda-version }}-pt${{ matrix.pytorch-version }}
           path: dist/*.whl
           retention-days: 30
 
