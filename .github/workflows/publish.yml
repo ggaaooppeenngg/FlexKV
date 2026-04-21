@@ -21,16 +21,34 @@ env:
 
 jobs:
   # ── Build matrix ──────────────────────────────────────────────────────────
+  # We build one wheel per CUDA variant. Torch's CUDA runtime is ABI-coupled
+  # to its major.minor: a wheel linked against libcudart.so.12 will not load
+  # in a torch-cu13 env and vice-versa. So we ship both:
+  #
+  #   - cu128 (default): published to TestPyPI as the canonical wheel
+  #                      (no local-version suffix, name = flexkv-X.Y.Z-...whl)
+  #                      and attached to the GitHub Release.
+  #   - cu130          : attached to the GitHub Release only, with a PEP 440
+  #                      local-version suffix `+cu130` in the filename
+  #                      (PyPI rejects local versions). Users install via URL:
+  #                         pip install https://.../flexkv-X.Y.Z+cu130-...whl
   build:
     name: Build Wheel (py${{ matrix.python-version }}, cu${{ matrix.cuda-version }}, pt${{ matrix.pytorch-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu-22.04"]
-        python-version: ["3.12"]
-        pytorch-version: ["2.9.0"]
-        cuda-version: ["13.0"]
+        include:
+          - os: "ubuntu-22.04"
+            python-version: "3.12"
+            cuda-version: "12.8"
+            pytorch-version: "2.7.1"
+            is-default-cuda: true
+          - os: "ubuntu-22.04"
+            python-version: "3.12"
+            cuda-version: "13.0"
+            pytorch-version: "2.9.0"
+            is-default-cuda: false
 
     steps:
       - name: Checkout
@@ -75,10 +93,27 @@ jobs:
           echo "Setting VERSION to ${tag_version}"
           printf '%s\n' "${tag_version}" > VERSION
 
+      - name: Append +cuXYZ local version suffix for non-default CUDA
+        if: matrix.is-default-cuda != true
+        shell: bash
+        run: |
+          # PEP 440 local-version identifier: "<base>+cu130". PyPI rejects local
+          # versions, which is exactly what we want for non-default CUDA builds
+          # (they go to the GitHub Release only). Two wheels with the same base
+          # version but different +cuXYZ suffixes live side-by-side in `dist/`
+          # without colliding.
+          suffix="+cu$(echo '${{ matrix.cuda-version }}' | tr -d '.')"
+          current="$(cat VERSION)"
+          # Strip any pre-existing local-version segment so re-runs are idempotent.
+          base="${current%%+*}"
+          new="${base}${suffix}"
+          echo "VERSION: ${current} -> ${new}"
+          printf '%s\n' "${new}" > VERSION
+
       - name: Build wheel
         shell: bash
         env:
-          TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0+PTX 10.0a"
+          TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0a 9.0+PTX 10.0a"
           MAX_JOBS: 4
         run: |
           .github/workflows/scripts/publish.sh
@@ -163,6 +198,27 @@ jobs:
           pattern: wheel-*
           path: dist/
           merge-multiple: true
+
+      - name: Keep only the default-CUDA wheel for TestPyPI
+        shell: bash
+        run: |
+          # TestPyPI / PyPI reject PEP 440 local-version identifiers, so we
+          # drop any wheel whose version contains a `+` (i.e. the +cu130
+          # variant). Only the default cu128 wheel is published to the index.
+          # The non-default wheels are still attached to the GitHub Release.
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            # Wheel filename: name-<version>-<python>-<abi>-<plat>.whl
+            # Version is the 2nd '-'-separated field.
+            version="$(basename "${whl}" | awk -F- '{print $2}')"
+            if [[ "${version}" == *+* ]]; then
+              echo "Skipping (local version not allowed on PyPI): ${whl}"
+              rm -f "${whl}"
+            else
+              echo "Publishing: ${whl}"
+            fi
+          done
+          ls -lh dist/
 
       - name: List wheels to publish
         run: ls -lh dist/
